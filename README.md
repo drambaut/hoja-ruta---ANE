@@ -89,20 +89,6 @@ streamlit run app.py
 
 Si `data/processed/mapeo_generado.csv` no existe, el dashboard muestra una instruccion para ejecutar primero el pipeline.
 
-## Render
-
-Render debe correr solo el dashboard:
-
-```bash
-streamlit run app.py --server.port $PORT --server.address 0.0.0.0
-```
-
-No se ejecuta Gemini automaticamente al abrir la app.
-
-Opciones recomendadas:
-
-- Opcion A: subir al repo `data/processed/hoja_ruta.csv` y `data/processed/mapeo_generado.csv`.
-- Opcion B: ejecutar localmente `python scripts/run_pipeline.py` antes del deploy y confirmar los CSV generados.
 
 ## Alcance
 
