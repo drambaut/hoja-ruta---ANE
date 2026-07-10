@@ -6,286 +6,253 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.coverage_model import build_project_activity_matrix
 
-STATUS_ORDER = [
-    "Mapeado",
-    "Mapeo parcial",
-    "Por validar",
-    "Por fuera",
-    "Siguiente vigencia",
-]
 
-STATUS_COLORS = {
-    "Mapeado": "#2E7D32",
-    "Mapeo parcial": "#F9A825",
-    "Por validar": "#9E9E9E",
-    "Por fuera": "#C62828",
-    "Siguiente vigencia": "#1565C0",
+RELATION_ORDER = ["Cubre", "Cubre parcialmente", "No cubre"]
+COVERAGE_ORDER = ["Cubierta", "Parcialmente cubierta", "Sin cobertura"]
+
+RELATION_COLORS = {
+    "Cubre": "#2E7D32",
+    "Cubre parcialmente": "#F59E0B",
+    "No cubre": "#E5E7EB",
 }
 
-DECISION_COLORS = {
-    "Se mantiene": "#2E7D32",
-    "Pasa a siguiente vigencia": "#1565C0",
-    "Requiere validacion": "#9E9E9E",
-    "Requiere validación": "#9E9E9E",
-    "Por fuera de la hoja de ruta": "#C62828",
+COVERAGE_COLORS = {
+    "Cubierta": "#2E7D32",
+    "Parcialmente cubierta": "#F59E0B",
+    "Sin cobertura": "#9CA3AF",
 }
 
-EXCLUDED_LINE_VALUES = {
-    "Sin informacion suficiente",
-    "Sin información suficiente",
-    "No identificada",
-    "No identificado",
-    "",
+SHORT_LABELS = {
+    "Cubre": "Si",
+    "Cubre parcialmente": "Parcial",
+    "No cubre": "No",
 }
 
 
-def _has_columns(df: pd.DataFrame, columns: set[str], context: str) -> bool:
-    missing = sorted(columns - set(df.columns))
-    if missing:
-        st.info(f"No hay informacion suficiente para mostrar {context}.")
-        return False
-    return True
+def apply_filters(summary_df: pd.DataFrame, mapping_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    st.subheader("Filtros")
+    filtered_summary = summary_df.copy()
+    filtered_mapping = mapping_df.copy()
+    cols = st.columns(4)
+
+    line_options = sorted(filtered_summary["linea_hoja_ruta"].dropna().astype(str).unique())
+    state_options = sorted(filtered_summary["estado_cobertura"].dropna().astype(str).unique())
+    project_options = sorted(filtered_mapping["codigo_proyecto"].dropna().astype(str).unique())
+    relation_options = RELATION_ORDER
+
+    selected_lines = cols[0].multiselect("Linea", options=line_options)
+    selected_states = cols[1].multiselect("Cobertura actividad", options=state_options)
+    selected_projects = cols[2].multiselect("Proyecto", options=project_options)
+    selected_relations = cols[3].multiselect("Estado relacion", options=relation_options)
+
+    if selected_lines:
+        filtered_summary = filtered_summary[filtered_summary["linea_hoja_ruta"].astype(str).isin(selected_lines)]
+    if selected_states:
+        filtered_summary = filtered_summary[filtered_summary["estado_cobertura"].astype(str).isin(selected_states)]
+
+    allowed_activities = set(filtered_summary["id_actividad"].astype(str))
+    filtered_mapping = filtered_mapping[filtered_mapping["id_actividad"].astype(str).isin(allowed_activities)]
+
+    if selected_projects:
+        filtered_mapping = filtered_mapping[filtered_mapping["codigo_proyecto"].astype(str).isin(selected_projects)]
+    if selected_relations:
+        filtered_mapping = filtered_mapping[filtered_mapping["estado_relacion"].astype(str).isin(selected_relations)]
+
+    if selected_projects or selected_relations:
+        allowed_activities = set(filtered_mapping["id_actividad"].astype(str))
+        filtered_summary = filtered_summary[filtered_summary["id_actividad"].astype(str).isin(allowed_activities)]
+
+    return filtered_summary, filtered_mapping
 
 
-def _project_status_counts(df_mapeo: pd.DataFrame) -> pd.Series:
-    if not _has_columns(df_mapeo, {"codigo_proyecto", "estado_mapeo"}, "los KPIs"):
-        return pd.Series(dtype="int64")
-
-    priority = {status: index for index, status in enumerate(STATUS_ORDER)}
-    status_by_project = (
-        df_mapeo.assign(
-            _priority=df_mapeo["estado_mapeo"].map(priority).fillna(len(priority))
-        )
-        .sort_values("_priority")
-        .drop_duplicates("codigo_proyecto")
-    )
-    return status_by_project["estado_mapeo"].value_counts()
-
-
-def render_kpis(df_mapeo: pd.DataFrame) -> None:
-    if df_mapeo.empty:
-        st.info("No hay datos de mapeo para mostrar.")
-        return
-
-    if not _has_columns(df_mapeo, {"codigo_proyecto", "estado_mapeo"}, "los KPIs"):
-        return
-
-    total_projects = df_mapeo["codigo_proyecto"].nunique()
-    status_counts = _project_status_counts(df_mapeo)
+def render_kpis(summary_df: pd.DataFrame) -> None:
+    total = len(summary_df)
+    counts = summary_df["estado_cobertura"].value_counts()
+    covered = int(counts.get("Cubierta", 0))
+    partial = int(counts.get("Parcialmente cubierta", 0))
+    uncovered = int(counts.get("Sin cobertura", 0))
+    coverage_pct = ((covered + 0.5 * partial) / total * 100) if total else 0
 
     kpis = [
-        ("Total proyectos", total_projects),
-        ("Mapeados", int(status_counts.get("Mapeado", 0))),
-        ("Mapeo parcial", int(status_counts.get("Mapeo parcial", 0))),
-        ("Por validar", int(status_counts.get("Por validar", 0))),
-        ("Por fuera", int(status_counts.get("Por fuera", 0))),
-        ("Siguiente vigencia", int(status_counts.get("Siguiente vigencia", 0))),
+        ("Total actividades", total),
+        ("Cubiertas", covered),
+        ("Parcialmente cubiertas", partial),
+        ("Sin cobertura", uncovered),
+        ("% cobertura", f"{coverage_pct:.1f}%"),
     ]
 
-    cols = st.columns(6)
+    cols = st.columns(5)
     for col, (label, value) in zip(cols, kpis):
         col.markdown(
             f"""
             <div class="kpi-card">
                 <div class="kpi-label">{html.escape(label)}</div>
-                <div class="kpi-value">{value}</div>
+                <div class="kpi-value">{html.escape(str(value))}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-
-def render_estado_mapeo_chart(df_mapeo: pd.DataFrame) -> None:
-    if df_mapeo.empty:
-        return
-    if not _has_columns(df_mapeo, {"codigo_proyecto", "estado_mapeo"}, "estado de mapeo"):
-        return
-
-    st.subheader("Estado de mapeo")
     st.caption(
-        "Esta vista muestra cuantos proyectos tienen relacion clara, parcial o pendiente con la hoja de ruta. "
-        "No mide avance tecnico, solo alineacion."
+        "Formula: (actividades cubiertas + 0.5 x actividades parcialmente cubiertas) / 29 x 100. "
+        "El mapeo analiza correspondencia tematica y de alcance, no avance ni ejecucion."
     )
 
-    counts = _project_status_counts(df_mapeo).reindex(STATUS_ORDER, fill_value=0)
-    data = counts.reset_index()
-    data.columns = ["estado_mapeo", "cantidad"]
-    data = data[data["cantidad"] > 0]
 
+def render_estado_cobertura_chart(summary_df: pd.DataFrame) -> None:
+    st.subheader("Distribucion de cobertura")
+    data = (
+        summary_df["estado_cobertura"]
+        .value_counts()
+        .reindex(COVERAGE_ORDER, fill_value=0)
+        .reset_index()
+    )
+    data.columns = ["estado_cobertura", "cantidad"]
+    data = data[data["cantidad"] > 0]
     fig = px.pie(
         data,
-        names="estado_mapeo",
+        names="estado_cobertura",
         values="cantidad",
         hole=0.55,
-        color="estado_mapeo",
-        color_discrete_map=STATUS_COLORS,
+        color="estado_cobertura",
+        color_discrete_map=COVERAGE_COLORS,
     )
     fig.update_traces(textposition="inside", textinfo="label+value")
     fig.update_layout(margin=dict(l=10, r=10, t=20, b=10), legend_title_text="")
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_cobertura_lineas_chart(df_mapeo: pd.DataFrame) -> None:
-    if df_mapeo.empty:
-        return
-    required = {"linea_hoja_ruta", "codigo_proyecto"}
-    if not _has_columns(df_mapeo, required, "cobertura por linea"):
-        return
-
-    st.subheader("Cobertura por linea de hoja de ruta")
-    st.caption(
-        "Esta grafica permite ver en que lineas se concentran los proyectos y cuales tienen menor cobertura."
-    )
-
-    filtered = df_mapeo[
-        ~df_mapeo["linea_hoja_ruta"].fillna("").astype(str).isin(EXCLUDED_LINE_VALUES)
-    ].copy()
-    if filtered.empty:
-        st.info("No hay lineas de hoja de ruta identificadas para graficar.")
-        return
-
+def render_cobertura_lineas_chart(summary_df: pd.DataFrame) -> None:
+    st.subheader("Cobertura por linea")
     data = (
-        filtered.groupby("linea_hoja_ruta")["codigo_proyecto"]
-        .nunique()
-        .reset_index(name="proyectos_unicos")
-        .sort_values("proyectos_unicos", ascending=True)
+        summary_df.groupby(["linea_hoja_ruta", "estado_cobertura"])
+        .size()
+        .reset_index(name="actividades")
     )
     fig = px.bar(
         data,
-        x="proyectos_unicos",
+        x="actividades",
         y="linea_hoja_ruta",
+        color="estado_cobertura",
         orientation="h",
-        text="proyectos_unicos",
-        color_discrete_sequence=["#3F7CAC"],
+        text="actividades",
+        color_discrete_map=COVERAGE_COLORS,
+        category_orders={"estado_cobertura": COVERAGE_ORDER},
     )
-    fig.update_layout(
-        xaxis_title="Proyectos unicos",
-        yaxis_title="",
-        margin=dict(l=10, r=10, t=20, b=10),
-        height=max(320, 42 * len(data)),
-    )
+    fig.update_layout(xaxis_title="Actividades", yaxis_title="", legend_title_text="Estado")
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_matriz_proyecto_linea(df_mapeo: pd.DataFrame) -> None:
-    if df_mapeo.empty:
-        return
-    required = {"codigo_proyecto", "linea_hoja_ruta", "estado_mapeo"}
-    if not _has_columns(df_mapeo, required, "la matriz proyecto-linea"):
-        return
-
-    st.subheader("Matriz Proyecto x Linea de accion")
-    st.caption(
-        "La matriz muestra si cada proyecto aporta a alguna linea de la hoja de ruta. "
-        "Los grises indican que falta informacion para decidir."
+def render_proyectos_por_actividad(summary_df: pd.DataFrame) -> None:
+    st.subheader("Cantidad de proyectos que cubren cada actividad")
+    data = summary_df.copy()
+    data["proyectos_con_relacion"] = (
+        data["total_proyectos_que_cubren"].astype(int)
+        + data["total_proyectos_parciales"].astype(int)
     )
-
-    filtered = df_mapeo[
-        ~df_mapeo["linea_hoja_ruta"].fillna("").astype(str).isin(EXCLUDED_LINE_VALUES)
-    ].copy()
-    if filtered.empty:
-        st.info("No hay relaciones proyecto-linea suficientes para construir la matriz.")
-        return
-
-    status_rank = {status: index for index, status in enumerate(STATUS_ORDER, start=1)}
-    matrix = filtered.pivot_table(
-        index="codigo_proyecto",
-        columns="linea_hoja_ruta",
-        values="estado_mapeo",
-        aggfunc=lambda values: sorted(
-            set(str(value) for value in values),
-            key=lambda value: status_rank.get(value, 99),
-        )[0],
-        fill_value="",
-    )
-
-    html_table = ['<div class="matrix-wrap"><table class="matrix-table">']
-    html_table.append("<thead><tr><th>Proyecto</th>")
-    for column in matrix.columns:
-        html_table.append(f"<th>{html.escape(str(column))}</th>")
-    html_table.append("</tr></thead><tbody>")
-
-    for project, row in matrix.iterrows():
-        html_table.append(f"<tr><th>{html.escape(str(project))}</th>")
-        for value in row:
-            value_text = str(value) if value else ""
-            color = STATUS_COLORS.get(value_text, "#ECEFF1")
-            html_table.append(
-                f'<td style="background:{color};" title="{html.escape(value_text)}">'
-                f"{html.escape(value_text)}</td>"
-            )
-        html_table.append("</tr>")
-
-    html_table.append("</tbody></table></div>")
-    st.markdown("".join(html_table), unsafe_allow_html=True)
-
-
-def render_decision_vigencia_chart(df_mapeo: pd.DataFrame) -> None:
-    if df_mapeo.empty:
-        return
-    required = {"codigo_proyecto", "decision_vigencia"}
-    if not _has_columns(df_mapeo, required, "decision de vigencia"):
-        return
-
-    st.subheader("Decision de vigencia")
-    st.caption("Esta vista resume la decision preliminar de gestion para cada proyecto.")
-
-    decision_by_project = df_mapeo.drop_duplicates("codigo_proyecto")
-    data = decision_by_project["decision_vigencia"].value_counts().reset_index()
-    data.columns = ["decision_vigencia", "cantidad"]
     fig = px.bar(
-        data,
-        x="cantidad",
-        y="decision_vigencia",
+        data.sort_values("proyectos_con_relacion", ascending=True),
+        x="proyectos_con_relacion",
+        y="id_actividad",
         orientation="h",
-        text="cantidad",
-        color="decision_vigencia",
-        color_discrete_map=DECISION_COLORS,
+        text="proyectos_con_relacion",
+        color="estado_cobertura",
+        color_discrete_map=COVERAGE_COLORS,
+        hover_data=["actividad", "proyectos_que_cubren", "proyectos_parciales"],
     )
-    fig.update_layout(
-        xaxis_title="Proyectos",
-        yaxis_title="",
-        legend_title_text="",
-        showlegend=False,
-        margin=dict(l=10, r=10, t=20, b=10),
-    )
+    fig.update_layout(xaxis_title="Proyectos con cobertura total o parcial", yaxis_title="Actividad", height=760)
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_tabla_respaldo(df_mapeo: pd.DataFrame) -> None:
-    if df_mapeo.empty:
+def render_legend() -> None:
+    st.markdown(
+        """
+        <div class="note">
+        <strong>Leyenda:</strong>
+        <span class="legend-dot cover"></span> Cubre: el proyecto contempla sustancialmente la actividad.
+        <span class="legend-dot partial"></span> Cubre parcialmente: contempla solo una parte de la actividad.
+        <span class="legend-dot none"></span> No cubre: el proyecto no contempla la actividad.
+        Este mapeo analiza correspondencia tematica y de alcance, no avance ni ejecucion del proyecto.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_matriz_proyecto_actividad(mapping_df: pd.DataFrame, roadmap_df: pd.DataFrame, projects_df: pd.DataFrame) -> None:
+    st.subheader("Matriz Proyecto x Actividad")
+    render_legend()
+    matrix = build_project_activity_matrix(mapping_df, roadmap_df, projects_df)
+
+    activity_text = {
+        f"{row.id_actividad} - {row.actividad}": row.actividad
+        for row in roadmap_df.itertuples()
+    }
+    justification_lookup = {
+        (f"{row.codigo_proyecto} - {row.nombre_proyecto}", f"{row.id_actividad} - {row.actividad}"): row.justificacion
+        for row in mapping_df.itertuples()
+    }
+
+    table = ['<div class="matrix-wrap"><table class="matrix-table">']
+    table.append("<thead><tr><th>Proyecto</th>")
+    for column in matrix.columns:
+        table.append(f"<th title=\"{html.escape(column)}\">{html.escape(column)}</th>")
+    table.append("</tr></thead><tbody>")
+
+    for project_label, row in matrix.iterrows():
+        table.append(f"<tr><th>{html.escape(str(project_label))}</th>")
+        for column, state in row.items():
+            state_text = str(state)
+            short = SHORT_LABELS.get(state_text, state_text)
+            color = RELATION_COLORS.get(state_text, "#E5E7EB")
+            text_color = "#111827" if state_text == "No cubre" else "#FFFFFF"
+            reason = justification_lookup.get((project_label, column), "")
+            tooltip = (
+                f"Proyecto: {project_label}\n"
+                f"Actividad: {column}\n"
+                f"Resultado: {state_text}\n"
+                f"Razon: {reason}"
+            )
+            table.append(
+                f'<td style="background:{color}; color:{text_color};" title="{html.escape(tooltip)}">'
+                f"{html.escape(short)}</td>"
+            )
+        table.append("</tr>")
+
+    table.append("</tbody></table></div>")
+    st.markdown("".join(table), unsafe_allow_html=True)
+
+    with st.expander("Referencia de actividades"):
+        reference = roadmap_df[["id_actividad", "actividad", "linea_hoja_ruta"]].copy()
+        reference["Referencia"] = reference["id_actividad"] + " - " + reference["actividad"]
+        st.dataframe(reference[["Referencia", "linea_hoja_ruta"]], use_container_width=True, hide_index=True)
+
+
+def render_actividades_sin_cobertura(summary_df: pd.DataFrame) -> None:
+    st.subheader("Actividades sin cobertura")
+    uncovered = summary_df[summary_df["estado_cobertura"] == "Sin cobertura"]
+    if uncovered.empty:
+        st.success("No hay actividades sin cobertura en el filtro actual.")
         return
+    st.dataframe(
+        uncovered[["id_actividad", "linea_hoja_ruta", "actividad"]],
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    st.subheader("Tabla minima de respaldo")
 
-    required_columns = [
-        "codigo_proyecto",
-        "nombre_proyecto",
-        "linea_hoja_ruta",
-        "estado_mapeo",
-        "decision_vigencia",
-        "nivel_confianza_mapeo",
-        "justificacion",
-    ]
-    available_columns = [column for column in required_columns if column in df_mapeo.columns]
-    if not available_columns:
-        st.info("No hay columnas esperadas para mostrar la tabla de respaldo.")
+def render_tabla_detallada(mapping_df: pd.DataFrame) -> None:
+    st.subheader("Tabla detallada")
+    if mapping_df.empty:
+        st.info("No hay pares proyecto-actividad para mostrar.")
         return
-
-    filtered = df_mapeo.copy()
-    filter_cols = st.columns(3)
-
-    for column, label, container in [
-        ("estado_mapeo", "Estado", filter_cols[0]),
-        ("decision_vigencia", "Decision", filter_cols[1]),
-        ("linea_hoja_ruta", "Linea", filter_cols[2]),
-    ]:
-        if column not in filtered.columns:
-            continue
-        options = sorted(value for value in filtered[column].dropna().astype(str).unique())
-        selected = container.multiselect(label, options=options)
-        if selected:
-            filtered = filtered[filtered[column].astype(str).isin(selected)]
-
-    st.dataframe(filtered[available_columns], use_container_width=True, hide_index=True)
+    table = mapping_df.copy()
+    table["Proyecto"] = table["codigo_proyecto"] + " - " + table["nombre_proyecto"]
+    table["Actividad"] = table["id_actividad"] + " - " + table["actividad"]
+    table = table.rename(columns={"estado_relacion": "Estado", "justificacion": "Justificacion"})
+    st.dataframe(
+        table[["Proyecto", "Actividad", "linea_hoja_ruta", "Estado", "Justificacion"]],
+        use_container_width=True,
+        hide_index=True,
+    )

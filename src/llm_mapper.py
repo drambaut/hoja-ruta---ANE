@@ -2,102 +2,62 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.data_loader import save_csv
+from src.coverage_model import (
+    MAPPING_COLUMNS,
+    ROADMAP_COLUMNS,
+    get_project_table,
+    save_validated_mapping,
+    save_validated_roadmap,
+)
 from src.gemini_client import generate_text
 from src.preprocessing import csv_text_to_dataframe, extract_text_from_pdf
 
 
-ROADMAP_COLUMNS = {
-    "id_actividad",
-    "linea_hoja_ruta",
-    "actividad",
-    "horizonte",
-    "responsable_sugerido",
-    "fuente",
-    "observaciones",
-}
-
-MAPPING_COLUMNS = {
-    "codigo_proyecto",
-    "nombre_proyecto",
-    "linea_hoja_ruta",
-    "actividad_hoja_ruta_relacionada",
-    "tipo_relacion",
-    "estado_mapeo",
-    "decision_vigencia",
-    "nivel_confianza_mapeo",
-    "justificacion",
-    "vigencia",
-}
-
-
-def _warn_missing_columns(df: pd.DataFrame, expected_columns: set[str], label: str) -> None:
-    missing_columns = sorted(expected_columns - set(df.columns))
-    if missing_columns:
-        print(f"WARNING - {label}: faltan columnas esperadas: {', '.join(missing_columns)}.")
+MAX_BATCH_ATTEMPTS = 3
+ACTIVITIES_PER_BATCH = 5
 
 
 def extract_roadmap_from_pdf_with_gemini(
     pdf_path: Path,
     output_path: Path,
 ) -> pd.DataFrame:
-    """
-    1. Extrae texto del PDF.
-    2. Construye un prompt para Gemini.
-    3. Gemini devuelve CSV estructurado.
-    4. Guarda data/processed/hoja_ruta.csv.
-    5. Devuelve DataFrame.
-    """
+    """Extrae exactamente 29 actividades del PDF y guarda la tabla maestra validada."""
     pdf_text = extract_text_from_pdf(pdf_path)
     prompt = f"""Eres un asistente experto en estructuracion de documentos institucionales.
 
 Recibiras el texto extraido de un PDF llamado "Estrategia de gestion de datos SGP_VF.pdf".
-Tu tarea es extraer unicamente las actividades de la hoja de ruta.
-
-Busca la seccion relacionada con:
-- Hoja de ruta 2026-2028
-- Actividades
-- Arquitectura, integracion y almacenamiento de datos
-- Gobernanza de datos
-- Analitica de datos
-- Optimizacion
-- Cultura organizacional en torno a la gestion de datos
+Tu tarea es extraer exactamente las 29 actividades de la hoja de ruta SGP.
 
 Devuelve SOLO un CSV valido, sin markdown y sin explicacion, con estas columnas:
 
-id_actividad,linea_hoja_ruta,actividad,horizonte,responsable_sugerido,fuente,observaciones
+id_actividad,linea_hoja_ruta,actividad,horizonte,observaciones
 
 Reglas:
-1. Extrae unicamente actividades de la hoja de ruta.
-2. No inventes actividades.
-3. Conserva el sentido del texto original.
-4. Si no identificas responsable, pon "No identificado".
-5. Si no identificas horizonte, pon "No identificado".
-6. En fuente pon "PDF hoja de ruta".
-7. En observaciones pon una frase corta o "Sin observaciones".
-8. Se esperan aproximadamente 29 actividades.
-9. El resultado debe ser CSV valido.
-10. No uses saltos de linea dentro de una celda.
+1. Extrae exactamente 29 actividades, una fila por actividad.
+2. id_actividad debe ser estable, unico y no nulo. Usa A01, A02, ..., A29 en el orden del documento.
+3. No resumas varias actividades en una sola.
+4. No dividas una actividad salvo que el documento la presente expresamente como actividad diferente.
+5. No inventes responsables, horizontes ni informacion ausente.
+6. Si horizonte u observaciones no aparecen, escribe "No especificado".
+7. Conserva el sentido del texto original.
+8. No uses saltos de linea dentro de una celda.
+9. Todas las celdas deben estar entre comillas dobles.
+10. Si una celda contiene comillas dobles, escapalas duplicandolas.
 11. No devuelvas markdown.
 12. No agregues texto antes ni despues del CSV.
-13. Todas las celdas deben estar entre comillas dobles.
-14. Si una celda contiene comillas dobles, escapalas duplicandolas.
 
 Texto del PDF:
 {pdf_text}
 """
     response_text = generate_text(prompt)
     df = csv_text_to_dataframe(response_text)
-    _warn_missing_columns(df, ROADMAP_COLUMNS, "Hoja de ruta")
-
-    activity_count = len(df)
-    if activity_count < 24 or activity_count > 34:
-        print(
-            f"Gemini devolvio {activity_count} actividades; se esperaban aproximadamente 29."
+    missing_columns = set(ROADMAP_COLUMNS) - set(df.columns)
+    if missing_columns:
+        raise ValueError(
+            "Gemini no devolvio la tabla maestra esperada. Faltan columnas: "
+            + ", ".join(sorted(missing_columns))
         )
-
-    save_csv(df, output_path)
-    return df
+    return save_validated_roadmap(df, output_path)
 
 
 def map_projects_to_roadmap_with_gemini(
@@ -106,99 +66,134 @@ def map_projects_to_roadmap_with_gemini(
     output_path: Path,
 ) -> pd.DataFrame:
     """
-    1. Convierte proyectos y hoja de ruta a texto CSV.
-    2. Construye prompt para Gemini.
-    3. Gemini devuelve CSV con el mapeo.
-    4. Guarda data/processed/mapeo_generado.csv.
-    5. Devuelve DataFrame.
+    Compara todos los proyectos contra cada actividad en lotes de una actividad.
+    El resultado final contiene una fila por cada par codigo_proyecto + id_actividad.
     """
     if projects_df.empty:
         raise ValueError("El DataFrame de proyectos esta vacio.")
     if roadmap_df.empty:
         raise ValueError("El DataFrame de hoja de ruta esta vacio.")
 
-    projects_csv = projects_df.to_csv(index=False)
-    roadmap_csv = roadmap_df.to_csv(index=False)
-    prompt = f"""Eres un asistente experto en planeacion institucional, analisis de proyectos y hojas de ruta.
+    projects = get_project_table(projects_df)
+    project_count = len(projects)
+    project_context_columns = [
+        column
+        for column in [
+            "codigo_proyecto",
+            "nombre_proyecto",
+            "objetivo",
+            "alcance",
+            "descripcion_general",
+            "observaciones",
+            "vigencia",
+        ]
+        if column in projects_df.columns
+    ]
+    projects_csv = projects_df[project_context_columns].to_csv(index=False)
 
-Recibiras dos tablas:
+    batches: list[pd.DataFrame] = []
+    for start in range(0, len(roadmap_df), ACTIVITIES_PER_BATCH):
+        activity_batch = roadmap_df.iloc[start : start + ACTIVITIES_PER_BATCH].copy()
+        activity_csv = activity_batch.to_csv(index=False)
+        expected_rows = project_count * len(activity_batch)
+        batch_label = ", ".join(activity_batch["id_actividad"].astype(str))
+        prompt = _build_mapping_prompt(expected_rows, activity_csv, projects_csv)
+        batch_df = _generate_activity_batch(prompt, batch_label, expected_rows)
+        batches.append(batch_df)
 
-1. Proyectos crudos ED01-ED14.
-2. Actividades de la hoja de ruta SGP.
+    combined = pd.concat(batches, ignore_index=True)
+    return save_validated_mapping(combined, roadmap_df, projects_df, output_path)
 
-Tu tarea es mapear cada proyecto contra la hoja de ruta para identificar:
-- si se alinea con alguna linea o actividad;
-- si la relacion es clara, parcial o requiere validacion;
-- que queda por fuera;
-- que podria pasar a la siguiente vigencia.
 
-IMPORTANTE:
-No evalues avance tecnico.
-No entres al detalle de tareas internas.
-No inventes informacion.
-Usa unicamente objetivo, alcance, descripcion, evidencia disponible y observaciones de los proyectos.
-Si no hay suficiente informacion, marca "Por validar".
+def _build_mapping_prompt(expected_rows: int, activity_csv: str, projects_csv: str) -> str:
+    return f"""Eres un asistente experto en planeacion institucional y hojas de ruta.
+
+Debes comparar TODAS las actividades de la Hoja de Ruta SGP recibidas contra TODOS los proyectos recibidos.
+
+Devuelve exactamente {expected_rows} filas: una fila por cada combinacion codigo_proyecto + id_actividad.
+No omitas ningun proyecto, no omitas ninguna actividad y no agregues proyectos ni actividades.
 
 Devuelve SOLO un CSV valido, sin markdown ni explicacion, con estas columnas:
 
-codigo_proyecto,nombre_proyecto,linea_hoja_ruta,actividad_hoja_ruta_relacionada,tipo_relacion,estado_mapeo,decision_vigencia,nivel_confianza_mapeo,justificacion,vigencia
+codigo_proyecto,nombre_proyecto,id_actividad,linea_hoja_ruta,actividad,estado_relacion,justificacion
 
-Valores permitidos:
+Estados permitidos para estado_relacion:
+- Cubre
+- Cubre parcialmente
+- No cubre
 
-tipo_relacion:
-- Directa
-- Parcial
-- Inferida
-- Sin informacion
-- No relacionada
-
-estado_mapeo:
-- Mapeado
-- Mapeo parcial
-- Por validar
-- Por fuera
-- Siguiente vigencia
-
-decision_vigencia:
-- Se mantiene
-- Pasa a siguiente vigencia
-- Requiere validacion
-- Por fuera de la hoja de ruta
-
-nivel_confianza_mapeo:
-- Alta
-- Media
-- Baja
+Definiciones:
+- Cubre: el proposito, alcance o descripcion del proyecto coincide de manera clara y sustancial con lo que busca realizar la actividad.
+- Cubre parcialmente: el proyecto se relaciona con la actividad, pero atiende solo una parte o un componente.
+- No cubre: el proposito, alcance y descripcion del proyecto no se relacionan de manera suficiente con la actividad.
 
 Reglas:
-1. Debe aparecer al menos una fila por cada proyecto ED01-ED14.
-2. Si un proyecto se relaciona con varias lineas de la hoja de ruta, puedes crear varias filas para el mismo proyecto.
-3. Si un proyecto no tiene informacion suficiente, crea una fila con:
-   - linea_hoja_ruta: "Sin informacion suficiente"
-   - actividad_hoja_ruta_relacionada: "No identificada"
-   - tipo_relacion: "Sin informacion"
-   - estado_mapeo: "Por validar"
-   - decision_vigencia: "Requiere validacion"
-   - nivel_confianza_mapeo: "Baja"
-4. Si un proyecto no se relaciona con la hoja de ruta, marca "Por fuera".
-5. La justificacion debe tener maximo una frase.
-6. No uses saltos de linea dentro de una celda.
-7. No devuelvas markdown.
-8. No agregues texto antes ni despues del CSV.
+1. Analiza solo codigo, nombre, objetivo, alcance, descripcion general, observaciones y vigencia del proyecto.
+2. No inventes funciones, entregables, resultados ni avance tecnico.
+3. No evalues evidencia, confianza, validacion, revision ni decision de vigencia.
+4. No uses "Por validar" bajo ninguna circunstancia.
+5. Una coincidencia aislada de palabras no es suficiente para afirmar cobertura.
+6. La justificacion debe ser una sola frase corta que explique directamente la relacion.
+7. La justificacion no debe mencionar evidencia, confianza, validacion, porcentajes ni avance.
+8. No uses saltos de linea dentro de una celda.
 9. Todas las celdas deben estar entre comillas dobles.
 10. Si una celda contiene comillas dobles, escapalas duplicandolas.
+11. No agregues texto antes ni despues del CSV.
 
-Tabla de proyectos:
+Actividades:
+{activity_csv}
+
+Proyectos:
 {projects_csv}
-
-Tabla de hoja de ruta:
-{roadmap_csv}
 """
-    response_text = generate_text(prompt)
-    df = csv_text_to_dataframe(response_text)
-    _warn_missing_columns(df, MAPPING_COLUMNS, "Mapeo generado")
-    save_csv(df, output_path)
-    return df
+
+
+def _generate_activity_batch(prompt: str, batch_label: str, expected_rows: int) -> pd.DataFrame:
+    last_error = ""
+    last_response = ""
+
+    for attempt in range(1, MAX_BATCH_ATTEMPTS + 1):
+        response_text = generate_text(prompt)
+        last_response = response_text[:800].replace("\n", " ")
+
+        try:
+            batch_df = csv_text_to_dataframe(response_text)
+        except Exception as exc:
+            last_error = str(exc)
+            prompt = _retry_prompt(prompt, batch_label, expected_rows, last_error)
+            continue
+
+        missing_columns = set(MAPPING_COLUMNS) - set(batch_df.columns)
+        if missing_columns:
+            last_error = "Faltan columnas: " + ", ".join(sorted(missing_columns))
+            prompt = _retry_prompt(prompt, batch_label, expected_rows, last_error)
+            continue
+
+        if len(batch_df) != expected_rows:
+            last_error = f"Filas recibidas: {len(batch_df)}; esperadas: {expected_rows}"
+            prompt = _retry_prompt(prompt, batch_label, expected_rows, last_error)
+            continue
+
+        return batch_df
+
+    raise ValueError(
+        f"Gemini no devolvio el lote esperado para {batch_label} despues de "
+        f"{MAX_BATCH_ATTEMPTS} intentos. Ultimo error: {last_error}. "
+        f"Preview respuesta: {last_response}"
+    )
+
+
+def _retry_prompt(original_prompt: str, batch_label: str, expected_rows: int, error: str) -> str:
+    return (
+        original_prompt
+        + "\n\nLa respuesta anterior fue invalida para el lote "
+        + batch_label
+        + ". Error detectado: "
+        + error
+        + "\nDevuelve nuevamente SOLO CSV valido con el encabezado exacto:\n"
+        + "codigo_proyecto,nombre_proyecto,id_actividad,linea_hoja_ruta,actividad,estado_relacion,justificacion\n"
+        + f"Debe tener exactamente {expected_rows} filas de datos y ninguna explicacion."
+    )
 
 
 def extract_roadmap_from_pdf(pdf_path: Path) -> pd.DataFrame:

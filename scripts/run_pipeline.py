@@ -24,7 +24,11 @@ def main() -> None:
 
         missing_outputs = [
             str(path.relative_to(config.BASE_DIR))
-            for path in (config.HOJA_RUTA_CSV, config.MAPEO_GENERADO_CSV)
+            for path in (
+                config.HOJA_RUTA_CSV,
+                config.MAPEO_GENERADO_CSV,
+                config.COBERTURA_ACTIVIDADES_CSV,
+            )
             if not path.exists()
         ]
         if missing_outputs:

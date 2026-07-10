@@ -9,26 +9,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import config
-from src.llm_mapper import ROADMAP_COLUMNS, extract_roadmap_from_pdf_with_gemini
+from src.coverage_model import EXPECTED_ACTIVITY_COUNT, ROADMAP_COLUMNS, validate_roadmap
+from src.data_loader import load_csv
+from src.llm_mapper import extract_roadmap_from_pdf_with_gemini
 
 
 def validate_columns(output_path: Path) -> None:
-    import pandas as pd
-
-    df = pd.read_csv(output_path)
-    missing_columns = sorted(ROADMAP_COLUMNS - set(df.columns))
+    df = load_csv(output_path)
+    missing_columns = sorted(set(ROADMAP_COLUMNS) - set(df.columns))
     if missing_columns:
         raise ValueError(
             "hoja_ruta.csv no tiene las columnas esperadas: "
             + ", ".join(missing_columns)
         )
 
-    activity_count = len(df)
-    if activity_count < 24 or activity_count > 34:
-        print(
-            f"WARNING - hoja_ruta.csv tiene {activity_count} actividades; "
-            "se esperaban aproximadamente 29."
-        )
+    validate_roadmap(df)
+    if len(df) != EXPECTED_ACTIVITY_COUNT:
+        raise ValueError("La tabla maestra no contiene exactamente 29 actividades.")
 
 
 def main() -> None:

@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 
 import pandas as pd
 import streamlit as st
@@ -37,3 +38,19 @@ def load_csv(path: Path) -> pd.DataFrame:
 def save_csv(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8")
+
+
+def save_csv_atomic(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+        df.to_csv(tmp_file, index=False)
+
+    tmp_path.replace(path)

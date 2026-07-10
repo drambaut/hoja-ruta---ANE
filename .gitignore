@@ -3,3 +3,7 @@
 __pycache__/
 *.pyc
 data/exports/
+data/raw/
+*.log
+*.tmp
+.streamlit/

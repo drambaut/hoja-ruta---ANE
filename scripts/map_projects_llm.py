@@ -9,28 +9,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import config
+from src.coverage_model import (
+    MAPPING_COLUMNS,
+    save_coverage_summary,
+    validate_mapping,
+)
 from src.data_loader import load_csv
-from src.llm_mapper import MAPPING_COLUMNS, map_projects_to_roadmap_with_gemini
+from src.llm_mapper import map_projects_to_roadmap_with_gemini
 
 
-def validate_columns(output_path: Path) -> None:
+def validate_columns(output_path: Path, roadmap_df) -> None:
     df = load_csv(output_path)
-    missing_columns = sorted(MAPPING_COLUMNS - set(df.columns))
+    projects_df = load_csv(config.PROYECTOS_RAW_CSV)
+    missing_columns = sorted(set(MAPPING_COLUMNS) - set(df.columns))
     if missing_columns:
         raise ValueError(
             "mapeo_generado.csv no tiene las columnas esperadas: "
             + ", ".join(missing_columns)
         )
-
-    if "codigo_proyecto" in df.columns:
-        expected_projects = {f"ED{index:02d}" for index in range(1, 15)}
-        found_projects = set(df["codigo_proyecto"].dropna().astype(str))
-        missing_projects = sorted(expected_projects - found_projects)
-        if missing_projects:
-            print(
-                "WARNING - No se encontraron filas para estos proyectos: "
-                + ", ".join(missing_projects)
-            )
+    validate_mapping(df, roadmap_df, projects_df)
 
 
 def main() -> None:
@@ -58,7 +55,15 @@ def main() -> None:
         )
 
         print("Guardando mapeo_generado.csv...")
-        validate_columns(config.MAPEO_GENERADO_CSV)
+        validate_columns(config.MAPEO_GENERADO_CSV, roadmap_df)
+        relationships_df = load_csv(config.MAPEO_GENERADO_CSV)
+        print("Generando cobertura_actividades.csv...")
+        summary_df = save_coverage_summary(
+            roadmap_df,
+            relationships_df,
+            config.COBERTURA_ACTIVIDADES_CSV,
+        )
+        print(f"Resumen de cobertura generado con {len(summary_df)} actividades.")
         print("Mapeo finalizado.")
     except Exception as exc:
         print(f"ERROR - {exc}")
