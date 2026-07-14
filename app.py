@@ -5,6 +5,7 @@ import streamlit as st
 from src import config
 from src.dashboard import (
     apply_filters,
+    render_articulation_chart,
     render_actividades_sin_cobertura,
     render_cobertura_lineas_chart,
     render_estado_cobertura_chart,
@@ -157,6 +158,8 @@ def main() -> None:
 
     filtered_summary, filtered_mapping = apply_filters(summary_df, mapping_df)
     render_kpis(filtered_summary)
+    st.divider()
+    render_articulation_chart(filtered_summary)
     st.divider()
 
     left, right = st.columns(2)
